@@ -1,0 +1,42 @@
+{
+  "ModId": "p4gpc.ultrawidesupport",
+  "ModName": "Ultrawide Support (Remove Letterboxing)",
+  "ModAuthor": "kecox15670",
+  "ModVersion": "1.0.0",
+  "ModDescription": "Remove Letterboxing, that's it.",
+  "ModDll": "p4gpc.ultrawidesupport.dll",
+  "ModIcon": "Preview.png",
+  "ModR2RManagedDll32": "x86/p4gpc.ultrawidesupport.dll",
+  "ModR2RManagedDll64": "x64/p4gpc.ultrawidesupport.dll",
+  "ModNativeDll32": "",
+  "ModNativeDll64": "",
+  "Tags": [],
+  "CanUnload": false,
+  "HasExports": false,
+  "IsLibrary": false,
+  "ReleaseMetadataFileName": "p4gpc.ultrawidesupport.ReleaseMetadata.json",
+  "IgnoreRegexes": [
+    ".*\\.json"
+  ],
+  "IncludeRegexes": [
+    "\\.deps\\.json",
+    "\\.runtimeconfig\\.json",
+    "ModConfig\\.json"
+  ],
+  "PluginData": {
+    "GameBanana": {
+      "ItemType": "Mod",
+      "ItemId": 720067
+    }
+  },
+  "IsUniversalMod": false,
+  "ModDependencies": [
+    "Reloaded.Memory.SigScan.ReloadedII",
+    "reloaded.sharedlib.hooks"
+  ],
+  "OptionalDependencies": [],
+  "SupportedAppId": [
+    "p4g.exe"
+  ],
+  "ProjectUrl": ""
+}
