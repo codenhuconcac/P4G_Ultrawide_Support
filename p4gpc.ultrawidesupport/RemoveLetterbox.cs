@@ -21,6 +21,7 @@ internal static unsafe class RemoveLetterbox
     private const string ProjectionAspectReferenceSignature =
         "F3 0F 59 15 ?? ?? ?? ?? 0F 28 CB 48 8B 4B 08 " +
         "F3 0F 11 83 84 00 00 00 F3 0F 5E D8";
+    private const int ProjectionFovReferenceOffset = 0x48;
 
     /// <summary>
     /// FUN_1404da2c0 loads shader constants, P4G/sprite_v uses uScreen as
@@ -43,26 +44,17 @@ internal static unsafe class RemoveLetterbox
         "48 89 6C 24 18 48 89 74 24 20 57 48 83 EC 30 8B E9 " +
         "4C 89 74 24 48 48 8D 0D ?? ?? ?? ?? 4D 63 F1";
 
-    private const string BattleOverlaySignature =
-        "40 53 48 83 EC 60 48 8D 0D ?? ?? ?? ?? 48 8B DA " +
-        "E8 ?? ?? ?? ?? 48 8B 83 50 15 00 00";
-
-    private const string BattleTargetRendererSignature =
-        "48 89 5C 24 20 55 56 57 48 83 EC 40 48 8B 05 ?? ?? ?? ?? " +
-        "48 33 C4 48 89 44 24 38 48 8B F1 49 8B D8";
-
-    private const string WorldToLogicalScreenCallSignature =
-        "48 8D 54 24 30 F3 0F 10 8B 8C 00 00 00 48 8D 4C 24 40 " +
-        "F3 0F 59 4B 2C F3 41 0F 59 CB F3 0F 58 C1 " +
-        "F3 0F 11 44 24 44 E8 ?? ?? ?? ?? 85 C0 0F 84 ?? ?? ?? ?? " +
-        "F3 0F 10 7C 24 30";
-    private const int WorldToLogicalScreenCallOffset = 38;
-
     // TVListing_MainStuff (FUN_140345460)
     private const string TvListingMainSignature =
         "48 8B C4 4C 89 40 18 66 89 50 10 53 55 56 57 " +
         "41 54 41 55 41 56 41 57 48 81 EC 28 01 00 00 " +
         "0F 29 70 A8";
+    private const string TvListingRenderSignature =
+        "48 89 5C 24 10 48 89 6C 24 18 48 89 74 24 20 " +
+        "57 48 83 EC 40 48 8B F1 0F 29 74 24 30";
+    private const string TvListingTaskRenderSignature =
+        "40 53 48 83 EC 50 48 8D 0D ?? ?? ?? ?? 48 8B DA " +
+        "E8 ?? ?? ?? ?? 48 8B 5B 48";
 
     /// <summary>
     /// FUN_140255760, flags 0x80019e TODO: fix the program frames since
@@ -80,13 +72,19 @@ internal static unsafe class RemoveLetterbox
     private const uint PageNoAccess = 0x01;
     private const int SpriteVertexStride = 24;
     private const int SpriteVertexCount = 4;
+    private const int FieldFilterVertexCount = 0x240;
+    private const int FieldColorFilterVertexCount = 0xE0;
+    private const int FieldColorFilterIndexCount = 0x150;
+    private const int MaxFilterVertexCount = 0x400;
     private const uint SpriteShaderFlag = 1U << 23;
     // movie submit 0x280019e: the normal sprite bit plus this movie bit
     private const uint MovieShaderFlag = 1U << 25;
+    private const uint EnemySelectionMarkerColor = 0xFF020FFF;
     private const float MatrixAspectTolerance = 0.025f;
 
     private const string SpriteVertexShaderPath = "P4G/sprite_v.vs";
     private const string EffectVertexShaderPath = "P4G/effect_v.vs";
+    private const string SystemEffectVertexShaderPath = "effect_v.vs";
     private const string Primitive2dVertexShaderPath = "system/vs_prim_2d_sys.vs";
     private const string Primitive2dFontVertexShaderPath = "system/vs_prim_2dFont_sys.vs";
 
@@ -117,13 +115,13 @@ internal static unsafe class RemoveLetterbox
     private static readonly HashSet<nint> UiScreenConstants = new();
 
     private static IHook<PresentRenderTargetDelegate>? _presentHook;
+    private static IHook<ProjectionFovDelegate>? _projectionFovHook;
     private static IHook<UploadShaderConstantDelegate>? _uploadShaderConstantHook;
     private static IHook<LoadVertexShaderDelegate>? _loadVertexShaderHook;
     private static IHook<RenderStuffLowDelegate>? _renderStuffLowHook;
-    private static IHook<BattleOverlayDelegate>? _battleOverlayHook;
-    private static IHook<BattleTargetRendererDelegate>? _battleTargetRendererHook;
-    private static IHook<WorldToLogicalScreenDelegate>? _worldToLogicalScreenHook;
     private static IHook<TvListingMainDelegate>? _tvListingMainHook;
+    private static IHook<TvListingRenderDelegate>? _tvListingRenderHook;
+    private static IHook<TvListingTaskRenderDelegate>? _tvListingTaskRenderHook;
     private static IHook<DrawSolidRectangleDelegate>? _drawSolidRectangleHook;
     private static nint _uiScreenConstant;
     private static float _uiOriginalWidth;
@@ -140,8 +138,10 @@ internal static unsafe class RemoveLetterbox
     private static bool _loggedPrimitive2dCorrection;
     private static bool _loggedEffectMatrixCorrection;
     private static bool _loggedMovieAspectFit;
-    private static bool _loggedBattleProjectionCorrection;
+    private static bool _loggedEnemySelectionMarkerCorrection;
+    private static bool _loggedFilterAspectFill;
     private static bool _loggedTvListingCorrection;
+    private static bool _loggedNarrowProjectionFov;
     private static bool _loggedWriteFailure;
 
     [ThreadStatic]
@@ -151,13 +151,10 @@ internal static unsafe class RemoveLetterbox
     private static bool _lastSpriteProportional;
 
     [ThreadStatic]
-    private static bool _insideBattleOverlay;
-
-    [ThreadStatic]
-    private static bool _insideBattleTargetRenderer;
-
-    [ThreadStatic]
     private static bool _insideTvListingMain;
+
+    [ThreadStatic]
+    private static bool _insideTvFrameRectangle;
 
     [Function(CallingConventions.Microsoft)]
     private delegate void PresentRenderTargetDelegate(
@@ -168,6 +165,9 @@ internal static unsafe class RemoveLetterbox
         float height,
         float outputWidth,
         float outputHeight);
+
+    [Function(CallingConventions.Microsoft)]
+    private delegate void ProjectionFovDelegate(nint projection, float verticalFovDegrees);
 
     [Function(CallingConventions.Microsoft)]
     private delegate nuint UploadShaderConstantDelegate(
@@ -194,22 +194,16 @@ internal static unsafe class RemoveLetterbox
         nint vertices);
 
     [Function(CallingConventions.Microsoft)]
-    private delegate void BattleOverlayDelegate(nint parameter1, nint battlePanel);
-
-    [Function(CallingConventions.Microsoft)]
-    private delegate void BattleTargetRendererDelegate(
-        nint parameter1,
-        nint markerState,
-        nint enemy);
-
-    [Function(CallingConventions.Microsoft)]
-    private delegate int WorldToLogicalScreenDelegate(nint worldPosition, nint screenPosition);
-
-    [Function(CallingConventions.Microsoft)]
     private delegate void TvListingMainDelegate(
         nint animation,
         ushort channel,
         nint channelEntries);
+
+    [Function(CallingConventions.Microsoft)]
+    private delegate void TvListingRenderDelegate(nint state);
+
+    [Function(CallingConventions.Microsoft)]
+    private delegate void TvListingTaskRenderDelegate(nint parameter1, nint task);
 
     [Function(CallingConventions.Microsoft)]
     private delegate void DrawSolidRectangleDelegate(
@@ -273,6 +267,15 @@ internal static unsafe class RemoveLetterbox
                     WriteProjectionAspectLocked(_requestedAspect);
                 }
                 LogDebugOnly($"[RemoveLetterbox] Projection aspect hooked at 0x{aspectAddress:X}.");
+
+                if (_projectionFovHook == null)
+                {
+                    nint fovFunctionAddress = address - ProjectionFovReferenceOffset;
+                    _projectionFovHook = hooks.CreateHook<ProjectionFovDelegate>(
+                        ProjectionFovHook, fovFunctionAddress).Activate();
+                    LogDebugOnly(
+                        $"[RemoveLetterbox] Projection FOV hooked at 0x{fovFunctionAddress:X}.");
+                }
             }
             catch (Exception ex)
             {
@@ -327,60 +330,6 @@ internal static unsafe class RemoveLetterbox
             }
         });
 
-        SigScan(BattleOverlaySignature, " ", address =>
-        {
-            try
-            {
-                if (_battleOverlayHook != null) return;
-                _battleOverlayHook = hooks.CreateHook<BattleOverlayDelegate>(
-                    BattleOverlayHook, address).Activate();
-                LogDebugOnly(
-                    $"[RemoveLetterbox] Battle overlay classification hooked at 0x{address:X}.");
-            }
-            catch (Exception ex)
-            {
-                LogErrorDebugOnly(
-                    $"[RemoveLetterbox] Failed to hook battle overlay classification: {ex.Message}");
-            }
-        });
-
-        SigScan(BattleTargetRendererSignature, " ", address =>
-        {
-            try
-            {
-                if (_battleTargetRendererHook != null) return;
-                _battleTargetRendererHook = hooks.CreateHook<BattleTargetRendererDelegate>(
-                    BattleTargetRendererHook, address).Activate();
-                LogDebugOnly(
-                    $"[RemoveLetterbox] Battle target-marker classification hooked at 0x{address:X}.");
-            }
-            catch (Exception ex)
-            {
-                LogErrorDebugOnly(
-                    $"[RemoveLetterbox] Failed to hook battle target-marker classification: {ex.Message}");
-            }
-        });
-
-        SigScan(WorldToLogicalScreenCallSignature, " ", address =>
-        {
-            try
-            {
-                if (_worldToLogicalScreenHook != null) return;
-                nint callAddress = address + WorldToLogicalScreenCallOffset;
-                nint functionAddress = (nint)GetGlobalAddress(callAddress + 1);
-                _worldToLogicalScreenHook = hooks.CreateHook<WorldToLogicalScreenDelegate>(
-                    WorldToLogicalScreenHook, functionAddress).Activate();
-                LogDebugOnly(
-                    $"[RemoveLetterbox] Battle projection correction hooked at " +
-                    $"0x{functionAddress:X}.");
-            }
-            catch (Exception ex)
-            {
-                LogErrorDebugOnly(
-                    $"[RemoveLetterbox] Failed to hook battle projection correction: {ex.Message}");
-            }
-        });
-
         SigScan(TvListingMainSignature, " ", address =>
         {
             try
@@ -395,6 +344,40 @@ internal static unsafe class RemoveLetterbox
             {
                 LogErrorDebugOnly(
                     $"[RemoveLetterbox] Failed to hook TV Listings frame classification: {ex.Message}");
+            }
+        });
+
+        SigScan(TvListingRenderSignature, " ", address =>
+        {
+            try
+            {
+                if (_tvListingRenderHook != null) return;
+                _tvListingRenderHook = hooks.CreateHook<TvListingRenderDelegate>(
+                    TvListingRenderHook, address).Activate();
+                LogDebugOnly(
+                    $"[RemoveLetterbox] TV Listings renderer hooked at 0x{address:X}.");
+            }
+            catch (Exception ex)
+            {
+                LogErrorDebugOnly(
+                    $"[RemoveLetterbox] Failed to hook TV Listings renderer: {ex.Message}");
+            }
+        });
+
+        SigScan(TvListingTaskRenderSignature, " ", address =>
+        {
+            try
+            {
+                if (_tvListingTaskRenderHook != null) return;
+                _tvListingTaskRenderHook = hooks.CreateHook<TvListingTaskRenderDelegate>(
+                    TvListingTaskRenderHook, address).Activate();
+                LogDebugOnly(
+                    $"[RemoveLetterbox] TV Listings task renderer hooked at 0x{address:X}.");
+            }
+            catch (Exception ex)
+            {
+                LogErrorDebugOnly(
+                    $"[RemoveLetterbox] Failed to hook TV Listings task renderer: {ex.Message}");
             }
         });
 
@@ -414,6 +397,34 @@ internal static unsafe class RemoveLetterbox
                     $"[RemoveLetterbox] Failed to hook rect: {ex.Message}");
             }
         });
+    }
+
+    private static void TvListingRenderHook(nint state)
+    {
+        bool previous = _insideTvListingMain;
+        _insideTvListingMain = true;
+        try
+        {
+            _tvListingRenderHook!.OriginalFunction(state);
+        }
+        finally
+        {
+            _insideTvListingMain = previous;
+        }
+    }
+
+    private static void TvListingTaskRenderHook(nint parameter1, nint task)
+    {
+        bool previous = _insideTvListingMain;
+        _insideTvListingMain = true;
+        try
+        {
+            _tvListingTaskRenderHook!.OriginalFunction(parameter1, task);
+        }
+        finally
+        {
+            _insideTvListingMain = previous;
+        }
     }
 
     private static void TvListingMainHook(
@@ -441,7 +452,6 @@ internal static unsafe class RemoveLetterbox
     {
         float outputAspect = _outputAspect;
         if (!_insideTvListingMain || color == 0 || rectangle == 0 ||
-            *(uint*)color != 0xff000000U ||
             !float.IsFinite(outputAspect) || outputAspect <= 0.0f ||
             MathF.Abs(outputAspect - StockAspect) <= 0.0001f)
         {
@@ -456,8 +466,24 @@ internal static unsafe class RemoveLetterbox
         float width = source[2];
         float height = source[3];
         if (!float.IsFinite(x) || !float.IsFinite(y) ||
-            !float.IsFinite(width) || !float.IsFinite(height))
+            !float.IsFinite(width) || !float.IsFinite(height) ||
+            width <= 0.0f || height <= 0.0f)
         {
+            _drawSolidRectangleHook!.OriginalFunction(
+                color, rectangle, depth, resetRenderState);
+            return;
+        }
+
+        float canvasWidth = _uiOriginalWidth;
+        float canvasHeight = _uiOriginalHeight;
+        if (IsFullCanvasSolidRectangle(
+                width,
+                height,
+                canvasWidth,
+                canvasHeight))
+        {
+            // Fullscreen clears/backings must continue to cover the output;
+            // aspect-fitting these was the source of the earlier ghosting.
             _drawSolidRectangleHook!.OriginalFunction(
                 color, rectangle, depth, resetRenderState);
             return;
@@ -470,87 +496,89 @@ internal static unsafe class RemoveLetterbox
         float* corrected = stackalloc float[4];
         corrected[2] = width * scaleX;
         corrected[3] = height * scaleY;
-        corrected[0] = x + (width - corrected[2]) * 0.5f;
-        corrected[1] = y + (height - corrected[3]) * 0.5f;
 
-        _drawSolidRectangleHook!.OriginalFunction(
-            color, (nint)corrected, depth, resetRenderState);
+        // The channel headers are transformed around the sprite canvas center.
+        // Transform the frame origin around that same center; shrinking around
+        // the rectangle's own center keeps its size proportional but moves it
+        // away from the header whenever the panel is off-center or animating.
+        float centerX = canvasWidth * 0.5f;
+        float centerY = canvasHeight * 0.5f;
+        if (!float.IsFinite(centerX) || canvasWidth <= 0.0f)
+            centerX = 480.0f;
+        if (!float.IsFinite(centerY) || canvasHeight <= 0.0f)
+            centerY = 270.0f;
+        corrected[0] = centerX + (x - centerX) * scaleX;
+        corrected[1] = centerY + (y - centerY) * scaleY;
+
+        bool previousFrame = _insideTvFrameRectangle;
+        _insideTvFrameRectangle = true;
+        try
+        {
+            _drawSolidRectangleHook!.OriginalFunction(
+                color, (nint)corrected, depth, resetRenderState);
+        }
+        finally
+        {
+            _insideTvFrameRectangle = previousFrame;
+        }
 
         if (!_loggedTvListingCorrection)
         {
             _loggedTvListingCorrection = true;
             LogDebugOnly(
-                $"[RemoveLetterbox] TV Listings proportional frame " +
-                $"(rect {width:0.###}x{height:0.###}, " +
+                $"[RemoveLetterbox] listings frame " +
+                $"(color 0x{*(uint*)color:X8}, rect {width:0.###}x{height:0.###}, " +
+                $"canvas {canvasWidth:0.###}x{canvasHeight:0.###}, " +
                 $"scale {scaleX:0.####},{scaleY:0.####})");
         }
     }
 
-    private static void BattleOverlayHook(nint parameter1, nint battlePanel)
+    private static bool IsFullCanvasSolidRectangle(
+        float width,
+        float height,
+        float canvasWidth,
+        float canvasHeight)
     {
-        bool previous = _insideBattleOverlay;
-        _insideBattleOverlay = true;
-        try
+        if (!float.IsFinite(canvasWidth) || !float.IsFinite(canvasHeight) ||
+            canvasWidth <= 0.0f || canvasHeight <= 0.0f)
         {
-            _battleOverlayHook!.OriginalFunction(parameter1, battlePanel);
+            return false;
         }
-        finally
-        {
-            _insideBattleOverlay = previous;
-        }
+
+        // Backing rectangles can animate from coordinates well outside the
+        // canvas, so origin-based coverage misclassifies them. Match the
+        // recovered sprite-quad rule: a rectangle at least 95% of both canvas
+        // dimensions is a fullscreen backing regardless of its current origin.
+        bool coversWidth = width >= canvasWidth * 0.95f;
+        bool coversHeight = height >= canvasHeight * 0.95f;
+        return coversWidth && coversHeight;
     }
 
-    private static void BattleTargetRendererHook(
-        nint parameter1,
-        nint markerState,
-        nint enemy)
+    private static void ProjectionFovHook(nint projection, float verticalFovDegrees)
     {
-        bool previous = _insideBattleTargetRenderer;
-        _insideBattleTargetRenderer = true;
-        try
-        {
-            _battleTargetRendererHook!.OriginalFunction(parameter1, markerState, enemy);
-        }
-        finally
-        {
-            _insideBattleTargetRenderer = previous;
-        }
-    }
-
-    private static int WorldToLogicalScreenHook(nint worldPosition, nint screenPosition)
-    {
-        int result = _worldToLogicalScreenHook!.OriginalFunction(
-            worldPosition, screenPosition);
-        if (result == 0 ||
-            (!_insideBattleOverlay && !_insideBattleTargetRenderer) ||
-            screenPosition == 0)
-            return result;
-
         float outputAspect = _outputAspect;
-        if (!float.IsFinite(outputAspect) || outputAspect <= 0.0f ||
-            MathF.Abs(outputAspect - StockAspect) <= 0.0001f)
+        float adjustedFov = verticalFovDegrees;
+        if (float.IsFinite(outputAspect) && outputAspect > 0.0f &&
+            outputAspect < StockAspect &&
+            float.IsFinite(verticalFovDegrees) &&
+            verticalFovDegrees > 0.0f && verticalFovDegrees < 179.0f)
         {
-            return result;
+            float halfAngle = verticalFovDegrees * MathF.PI / 360.0f;
+            adjustedFov = MathF.Atan(
+                MathF.Tan(halfAngle) * StockAspect / outputAspect) *
+                360.0f / MathF.PI;
+
+            if (!_loggedNarrowProjectionFov)
+            {
+                _loggedNarrowProjectionFov = true;
+                LogDebugOnly(
+                    $"[RemoveLetterbox] Narrow-output vertical FOV " +
+                    $"({verticalFovDegrees:0.###} -> {adjustedFov:0.###}, " +
+                    $"aspect {outputAspect:0.####})");
+            }
         }
 
-        float* screen = (float*)screenPosition;
-        if (outputAspect > StockAspect)
-        {
-            screen[0] = 960.0f + (screen[0] - 960.0f) * outputAspect / StockAspect;
-        }
-        else
-        {
-            screen[1] = 540.0f + (screen[1] - 540.0f) * StockAspect / outputAspect;
-        }
-
-        if (!_loggedBattleProjectionCorrection)
-        {
-            _loggedBattleProjectionCorrection = true;
-            LogDebugOnly(
-                $"[RemoveLetterbox] Battle projected-marker alignment " +
-                $"(output aspect {outputAspect:0.####})");
-        }
-        return result;
+        _projectionFovHook!.OriginalFunction(projection, adjustedFov);
     }
 
     private static void PresentRenderTargetHook(
@@ -678,6 +706,8 @@ internal static unsafe class RemoveLetterbox
             ((hasBounds && IsFullScreenQuad(minX, minY, maxX, maxY)) ||
              (!hasBounds && primitiveType == 0x0C000000 &&
               parameter4 == SpriteVertexCount && parameter5 == SpriteVertexCount));
+        bool previousLastSpriteProportional = _lastSpriteProportional;
+
         nint submittedVertices = vertices;
         byte* correctedMovieVertices = null;
         float outputAspect = _outputAspect;
@@ -713,20 +743,132 @@ internal static unsafe class RemoveLetterbox
                 _loggedMovieAspectFit = true;
                 LogDebugOnly(
                     $"[RemoveLetterbox] mobie aspect " +
-                    $"(scale {scaleX:0.####},{scaleY:0.####})");
+                $"(scale {scaleX:0.####},{scaleY:0.####})");
+            }
+        }
+
+        int markerVertexCount = parameter4 >= SpriteVertexCount &&
+            parameter4 <= 32 &&
+            (parameter5 == 0 || parameter5 == parameter4)
+                ? parameter4
+                : 0;
+        bool enemySelectionMarker = isSprite && markerVertexCount > 0 &&
+            HasUniformVertexColor(
+                vertices,
+                markerVertexCount,
+                EnemySelectionMarkerColor);
+        if (enemySelectionMarker && outputAspect > StockAspect + 0.0001f &&
+            TryGetSpriteBounds(
+                vertices,
+                markerVertexCount,
+                out float markerMinX,
+                out float markerMinY,
+                out float markerMaxX,
+                out float markerMaxY))
+        {
+            int markerVertexBytes = SpriteVertexStride * markerVertexCount;
+            byte* markerVertexBuffer = stackalloc byte[markerVertexBytes];
+            Buffer.MemoryCopy(
+                (void*)vertices,
+                markerVertexBuffer,
+                markerVertexBytes,
+                markerVertexBytes);
+
+            float markerCenterX = (markerMinX + markerMaxX) * 0.5f;
+            float correctedCenterX = 480.0f +
+                (markerCenterX - 480.0f) * outputAspect / StockAspect;
+            float shiftX = correctedCenterX - markerCenterX;
+            for (int i = 0; i < markerVertexCount; i++)
+            {
+                float* x = (float*)(markerVertexBuffer +
+                    i * SpriteVertexStride + 12);
+                *x += shiftX;
+            }
+            submittedVertices = (nint)markerVertexBuffer;
+
+            if (!_loggedEnemySelectionMarkerCorrection)
+            {
+                _loggedEnemySelectionMarkerCorrection = true;
+                LogDebugOnly(
+                    $"[RemoveLetterbox] enemy selection marker " +
+                    $"({markerVertexCount} vertices, center " +
+                    $"{markerCenterX:0.###}->{correctedCenterX:0.###}, " +
+                    $"bounds ({markerMinX:0.###},{markerMinY:0.###})-" +
+                    $"({markerMaxX:0.###},{markerMaxY:0.###})).");
+            }
+        }
+
+        bool fieldColorFilter = parameter4 == FieldColorFilterVertexCount &&
+            parameter5 == FieldColorFilterIndexCount;
+        int filterVertexCount = fieldColorFilter
+            ? FieldColorFilterVertexCount
+            : parameter4 == parameter5 &&
+            parameter4 >= SpriteVertexCount &&
+            parameter4 <= MaxFilterVertexCount
+                ? parameter4
+                : 0;
+        bool aspectFillFilter = isSprite && filterVertexCount > 0 &&
+            (filterVertexCount == FieldFilterVertexCount ||
+             fieldColorFilter);
+        if (aspectFillFilter &&
+            float.IsFinite(outputAspect) && outputAspect > 0.0f &&
+            MathF.Abs(outputAspect - StockAspect) > 0.0001f &&
+            TryGetSpriteBounds(
+                vertices,
+                filterVertexCount,
+                out float filterMinX,
+                out float filterMinY,
+                out float filterMaxX,
+                out float filterMaxY))
+        {
+            int filterVertexBytes = SpriteVertexStride * filterVertexCount;
+            byte* filterVertexBuffer = stackalloc byte[filterVertexBytes];
+            Buffer.MemoryCopy(
+                (void*)vertices,
+                filterVertexBuffer,
+                filterVertexBytes,
+                filterVertexBytes);
+
+            float sourceCenterX = (filterMinX + filterMaxX) * 0.5f;
+            float sourceCenterY = (filterMinY + filterMaxY) * 0.5f;
+            float destinationCenterX = sourceCenterX;
+            float destinationCenterY = sourceCenterY;
+            float fillScale;
+            // field filters already cover the stock canvas
+            fillScale = outputAspect > StockAspect
+                ? outputAspect / StockAspect
+                : StockAspect / outputAspect;
+            ScaleFilterVertices(
+                filterVertexBuffer,
+                filterVertexCount,
+                sourceCenterX,
+                sourceCenterY,
+                destinationCenterX,
+                destinationCenterY,
+                fillScale);
+            submittedVertices = (nint)filterVertexBuffer;
+
+            if (!_loggedFilterAspectFill)
+            {
+                _loggedFilterAspectFill = true;
+                LogDebugOnly(
+                    $"[RemoveLetterbox] fullscreen filter " +
+                    $"({filterVertexCount} vertices, scale {fillScale:0.####}, " +
+                    $"bounds ({filterMinX:0.###},{filterMinY:0.###})-" +
+                    $"({filterMaxX:0.###},{filterMaxY:0.###})).");
             }
         }
 
         if (isSprite && hasBounds)
-            _lastSpriteProportional = !fullScreenQuad;
+            _lastSpriteProportional = !fullScreenQuad || aspectFillFilter;
         bool logicalUiCanvas = IsLogicalUiCanvas();
         bool spriteQuadWithoutPointer = !hasBounds &&
             primitiveType == 0x0C000000 &&
             parameter4 == SpriteVertexCount &&
             parameter5 == SpriteVertexCount;
-        bool standardProportionalUi = isSprite &&
+        bool standardProportionalUi = isSprite && !_insideTvFrameRectangle &&
             (hasBounds
-                ? !fullScreenQuad
+                ? !fullScreenQuad || aspectFillFilter
                 : spriteQuadWithoutPointer || logicalUiCanvas || _lastSpriteProportional);
         bool proportionalUi = !_insideFinalComposite && standardProportionalUi;
 
@@ -755,6 +897,27 @@ internal static unsafe class RemoveLetterbox
         finally
         {
             _currentSpriteProportional = previous;
+            if (aspectFillFilter)
+                _lastSpriteProportional = previousLastSpriteProportional;
+        }
+    }
+
+    private static void ScaleFilterVertices(
+        byte* vertices,
+        int vertexCount,
+        float sourceCenterX,
+        float sourceCenterY,
+        float destinationCenterX,
+        float destinationCenterY,
+        float scale)
+    {
+        for (int i = 0; i < vertexCount; i++)
+        {
+            byte* vertex = vertices + i * SpriteVertexStride;
+            float* x = (float*)(vertex + 12);
+            float* y = (float*)(vertex + 16);
+            *x = destinationCenterX + (*x - sourceCenterX) * scale;
+            *y = destinationCenterY + (*y - sourceCenterY) * scale;
         }
     }
 
@@ -804,13 +967,52 @@ internal static unsafe class RemoveLetterbox
         out float maxX,
         out float maxY)
     {
+        return TryGetSpriteBounds(
+            vertices,
+            SpriteVertexCount,
+            out minX,
+            out minY,
+            out maxX,
+            out maxY);
+    }
+
+    private static bool HasUniformVertexColor(
+        nint vertices,
+        int vertexCount,
+        uint expectedColor)
+    {
+        if (vertexCount <= 0 || vertexCount > 32 ||
+            !IsReadableRange(vertices, SpriteVertexStride * vertexCount))
+        {
+            return false;
+        }
+
+        byte* vertex = (byte*)vertices;
+        for (int i = 0; i < vertexCount; i++, vertex += SpriteVertexStride)
+        {
+            if (*(uint*)(vertex + 8) != expectedColor)
+                return false;
+        }
+        return true;
+    }
+
+    private static bool TryGetSpriteBounds(
+        nint vertices,
+        int vertexCount,
+        out float minX,
+        out float minY,
+        out float maxX,
+        out float maxY)
+    {
         minX = minY = float.PositiveInfinity;
         maxX = maxY = float.NegativeInfinity;
-        const int bytesRequired = SpriteVertexStride * SpriteVertexCount;
+        if (vertexCount <= 0 || vertexCount > MaxFilterVertexCount)
+            return false;
+        int bytesRequired = SpriteVertexStride * vertexCount;
         if (!IsReadableRange(vertices, bytesRequired)) return false;
 
         byte* vertex = (byte*)vertices;
-        for (int i = 0; i < SpriteVertexCount; i++, vertex += SpriteVertexStride)
+        for (int i = 0; i < vertexCount; i++, vertex += SpriteVertexStride)
         {
             float x = *(float*)(vertex + 12);
             float y = *(float*)(vertex + 16);
@@ -1057,7 +1259,9 @@ internal static unsafe class RemoveLetterbox
         }
 
         nint owner = *(nint*)(shaderConstant + 0x78);
-        if (owner == 0 || !HasAsciiName(owner + 0x90350, EffectVertexShaderPath))
+        if (owner == 0 ||
+            (!HasAsciiName(owner + 0x90350, EffectVertexShaderPath) &&
+             !HasAsciiName(owner + 0x90350, SystemEffectVertexShaderPath)))
             return false;
 
         float outputAspect = _outputAspect;
